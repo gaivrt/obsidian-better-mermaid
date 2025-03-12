@@ -1,86 +1,164 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Editor, MarkdownView, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import panzoom from 'panzoom';
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
+interface BetterMermaidSettings {
+	zoomFactor: number;
+	minZoom: number;
+	maxZoom: number;
+	enableOverlay: boolean;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+const DEFAULT_SETTINGS: BetterMermaidSettings = {
+	zoomFactor: 0.2, // zoom speed
+	minZoom: 0.5,    // minimum zoom level
+	maxZoom: 10,     // maximum zoom level
+	enableOverlay: true
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class BetterMermaidPlugin extends Plugin {
+	settings: BetterMermaidSettings;
+	private activeOverlay: HTMLElement | null = null;
+	private activeInstance: any | null = null;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-			new Notice('Here I am! GAIVR!')
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+		// Register for updates whenever the view changes
+		this.registerEvent(
+			this.app.workspace.on('layout-change', this.handleLayoutChange.bind(this))
+		);
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+		// Register for updates whenever a file is opened
+		this.registerEvent(
+			this.app.workspace.on('file-open', this.handleFileOpen.bind(this))
+		);
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
+		// Add settings tab
+		this.addSettingTab(new BetterMermaidSettingTab(this.app, this));
+		
+		// Initial render
+		this.enhanceMermaidDiagrams();
+	}
+
+	/**
+	 * Called when layout changes
+	 */
+	private handleLayoutChange(): void {
+		this.enhanceMermaidDiagrams();
+	}
+
+	/**
+	 * Called when a file is opened
+	 */
+	private handleFileOpen(): void {
+		// Small delay to make sure diagrams are rendered
+		setTimeout(() => {
+			this.enhanceMermaidDiagrams();
+		}, 300);
+	}
+
+	/**
+	 * Find all Mermaid diagrams in the current view and enhance them
+	 */
+	private enhanceMermaidDiagrams(): void {
+		// Find all rendered mermaid diagrams
+		const mermaidDiagrams = document.querySelectorAll('.mermaid');
+		
+		mermaidDiagrams.forEach((diagramEl) => {
+			// Skip if already enhanced
+			if (diagramEl.hasAttribute('data-better-mermaid-enhanced')) {
+				return;
 			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+			// Mark as enhanced
+			diagramEl.setAttribute('data-better-mermaid-enhanced', 'true');
+
+			// Add click event to diagram
+			diagramEl.addEventListener('click', (e) => {
+				if (this.settings.enableOverlay) {
+					this.createOverlay(diagramEl as HTMLElement);
 				}
+			});
+		});
+	}
+
+	/**
+	 * Create an overlay with the diagram for zooming and panning
+	 */
+	private createOverlay(diagramEl: HTMLElement): void {
+		// Remove any existing overlay
+		this.removeOverlay();
+
+		// Create an overlay div
+		const overlay = document.createElement('div');
+		overlay.addClass('better-mermaid-overlay');
+		
+		// Clone the diagram to the overlay
+		const diagramClone = diagramEl.cloneNode(true) as HTMLElement;
+		diagramClone.addClass('better-mermaid-diagram');
+		overlay.appendChild(diagramClone);
+
+		// Add close button
+		const closeButton = document.createElement('div');
+		closeButton.addClass('better-mermaid-close-button');
+		closeButton.innerHTML = '×'; // × character
+		closeButton.addEventListener('click', (e) => {
+			e.stopPropagation();
+			this.removeOverlay();
+		});
+		overlay.appendChild(closeButton);
+
+		// Add to document body
+		document.body.appendChild(overlay);
+		this.activeOverlay = overlay;
+
+		// Initialize panzoom
+		this.activeInstance = panzoom(diagramClone, {
+			smoothScroll: false,
+			zoomDoubleClickSpeed: 1,
+			minZoom: this.settings.minZoom,
+			maxZoom: this.settings.maxZoom,
+			zoomSpeed: this.settings.zoomFactor
+		});
+
+		// Prevent default scroll behavior inside overlay
+		overlay.addEventListener('wheel', (e) => {
+			e.preventDefault();
+		});
+
+		// Close on ESC key
+		document.addEventListener('keydown', this.escKeyHandler);
+	}
+
+	private escKeyHandler = (e: KeyboardEvent) => {
+		if (e.key === 'Escape' && this.activeOverlay) {
+			this.removeOverlay();
+		}
+	};
+
+	/**
+	 * Remove the active overlay
+	 */
+	private removeOverlay(): void {
+		if (this.activeOverlay) {
+			// Remove ESC key handler
+			document.removeEventListener('keydown', this.escKeyHandler);
+
+			// Destroy panzoom instance
+			if (this.activeInstance) {
+				this.activeInstance.dispose();
+				this.activeInstance = null;
 			}
-		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+			// Remove overlay
+			document.body.removeChild(this.activeOverlay);
+			this.activeOverlay = null;
+		}
 	}
 
 	onunload() {
-
+		// Remove any active overlay
+		this.removeOverlay();
 	}
 
 	async loadSettings() {
@@ -92,44 +170,48 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class BetterMermaidSettingTab extends PluginSettingTab {
+	plugin: BetterMermaidPlugin;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: BetterMermaidPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
 		const {containerEl} = this;
-
 		containerEl.empty();
 
+		containerEl.createEl('h2', {text: 'Better Mermaid Settings'});
+
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+			.setName('Zoom Speed')
+			.setDesc('How fast to zoom in and out (0.1 - slow, 1.0 - fast)')
+			.addSlider(slider => slider
+				.setLimits(0.1, 1.0, 0.1)
+				.setValue(this.plugin.settings.zoomFactor)
+				.setDynamicTooltip()
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.zoomFactor = value;
 					await this.plugin.saveSettings();
 				}));
-	}
-}
+
+		new Setting(containerEl)
+			.setName('Minimum Zoom')
+			.setDesc('Minimum zoom level (0.1 - 1.0)')
+			.addSlider(slider => slider
+				.setLimits(0.1, 1.0, 0.1)
+				.setValue(this.plugin.settings.minZoom)
+				.setDynamicTooltip()
+				.onChange(async (value) => {
+					this.plugin.settings.minZoom = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Maximum Zoom')
+			.setDesc('Maximum zoom level (1.0 - 20.0)')
+			.addSlider(slider => slider
+				.setLimits(1.0, 20.0, 0.5)
+				.setValue(this.plugin.settings.maxZoom)
+				.setDynamicTooltip()
